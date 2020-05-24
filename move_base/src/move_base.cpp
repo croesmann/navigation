@@ -52,7 +52,7 @@ namespace move_base {
     as_(NULL),
     planner_costmap_ros_(NULL), controller_costmap_ros_(NULL),
     bgp_loader_("nav_core", "nav_core::BaseGlobalPlanner"),
-    blp_loader_("nav_core", "nav_core::BaseLocalPlanner"), 
+    blp_loader_("nav_core", "nav_core::BaseLocalPlanner"),
     recovery_loader_("nav_core", "nav_core::RecoveryBehavior"),
     planner_plan_(NULL), latest_plan_(NULL), controller_plan_(NULL),
     runPlanner_(false), setup_(false), p_freq_change_(false), c_freq_change_(false), new_global_plan_(false) {
@@ -380,7 +380,7 @@ namespace move_base {
     //first try to make a plan to the exact desired goal
     std::vector<geometry_msgs::PoseStamped> global_plan;
     if(!planner_->makePlan(start, req.goal, global_plan) || global_plan.empty()){
-      ROS_DEBUG_NAMED("move_base","Failed to find a plan to exact goal of (%.2f, %.2f), searching for a feasible goal within tolerance", 
+      ROS_DEBUG_NAMED("move_base","Failed to find a plan to exact goal of (%.2f, %.2f), searching for a feasible goal within tolerance",
           req.goal.pose.position.x, req.goal.pose.position.y);
 
       //search outwards for a feasible goal within the specified tolerance
@@ -500,11 +500,9 @@ namespace move_base {
   }
 
   void MoveBase::publishZeroVelocity(){
-    geometry_msgs::Twist cmd_vel;
-    cmd_vel.linear.x = 0.0;
-    cmd_vel.linear.y = 0.0;
-    cmd_vel.angular.z = 0.0;
-    vel_pub_.publish(cmd_vel);
+    cmd_vel_.linear.x = cmd_vel_.linear.y = cmd_vel_.linear.z = 0.0;
+    cmd_vel_.angular.x = cmd_vel_.angular.y = cmd_vel_.angular.z = 0.0;
+    vel_pub_.publish(cmd_vel_);
   }
 
   bool MoveBase::isQuaternionValid(const geometry_msgs::Quaternion& q){
@@ -654,7 +652,7 @@ namespace move_base {
     }
 
     geometry_msgs::PoseStamped goal = goalToGlobalFrame(move_base_goal->target_pose);
-  
+
     publishZeroVelocity();
     //we have a goal so start the planner
     boost::unique_lock<boost::recursive_mutex> lock(planner_mutex_);
@@ -801,7 +799,7 @@ namespace move_base {
   bool MoveBase::executeCycle(geometry_msgs::PoseStamped& goal, std::vector<geometry_msgs::PoseStamped>& global_plan){
     boost::recursive_mutex::scoped_lock ecl(configuration_mutex_);
     //we need to be able to publish velocity commands
-    geometry_msgs::Twist cmd_vel;
+    // geometry_msgs::Twist cmd_vel;
 
     //update feedback to correspond to our curent position
     geometry_msgs::PoseStamped global_pose;
@@ -811,7 +809,14 @@ namespace move_base {
     //push the feedback out
     move_base_msgs::MoveBaseFeedback feedback;
     feedback.base_position = current_position;
+    ros::WallDuration ctrl_duration = ctrl_timer_end_ - ctrl_timer_start_;
+    feedback.controller_cpu_time.sec = ctrl_duration.sec;
+    feedback.controller_cpu_time.nsec = ctrl_duration.nsec;
+    feedback.last_twist = cmd_vel_;
+    feedback.local_costamp_num_occupied_cells = local_costamp_num_occupied_cells_;
     as_->publishFeedback(feedback);
+    ctrl_timer_start_ = ros::WallTime(0);
+    ctrl_timer_end_ = ros::WallTime(0);
 
     //check to see if we've moved far enough to reset our oscillation timeout
     if(distance(current_position, oscillation_pose_) >= oscillation_distance_)
@@ -819,7 +824,7 @@ namespace move_base {
       last_oscillation_reset_ = ros::Time::now();
       oscillation_pose_ = current_position;
 
-      //if our last recovery was caused by oscillation, we want to reset the recovery index 
+      //if our last recovery was caused by oscillation, we want to reset the recovery index
       if(recovery_trigger_ == OSCILLATION_R)
         recovery_index_ = 0;
     }
@@ -904,16 +909,20 @@ namespace move_base {
           state_ = CLEARING;
           recovery_trigger_ = OSCILLATION_R;
         }
-        
+
         {
          boost::unique_lock<costmap_2d::Costmap2D::mutex_t> lock(*(controller_costmap_ros_->getCostmap()->getMutex()));
-        
-        if(tc_->computeVelocityCommands(cmd_vel)){
+
+        ctrl_timer_start_ = ros::WallTime::now();
+        bool tc_success = tc_->computeVelocityCommands(cmd_vel_);
+        ctrl_timer_end_ = ros::WallTime::now();
+        if(tc_success){
           ROS_DEBUG_NAMED( "move_base", "Got a valid command from the local planner: %.3lf, %.3lf, %.3lf",
-                           cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z );
+                           cmd_vel_.linear.x, cmd_vel_.linear.y, cmd_vel_.angular.z );
           last_valid_control_ = ros::Time::now();
           //make sure that we send the velocity command to the base
-          vel_pub_.publish(cmd_vel);
+          vel_pub_.publish(cmd_vel_);
+
           if(recovery_trigger_ == CONTROLLING_R)
             recovery_index_ = 0;
         }
@@ -942,6 +951,21 @@ namespace move_base {
             lock.unlock();
           }
         }
+
+        // COUNT OCCUPIED CELLS IN LOCAL COSTMAP (WARNING: FOR BENCHMARK/STATISTICS ONLY
+        local_costamp_num_occupied_cells_ = 0;
+        for (unsigned int i=0; i<controller_costmap_ros_->getCostmap()->getSizeInCellsX()-1; ++i)
+        {
+          for (unsigned int j=0; j<controller_costmap_ros_->getCostmap()->getSizeInCellsY()-1; ++j)
+          {
+            if (controller_costmap_ros_->getCostmap()->getCost(i,j) == costmap_2d::LETHAL_OBSTACLE)
+            {
+              ++local_costamp_num_occupied_cells_;
+            }
+          }
+        }
+
+
         }
 
         break;
@@ -1020,7 +1044,7 @@ namespace move_base {
                     std::string name_i = behavior_list[i]["name"];
                     std::string name_j = behavior_list[j]["name"];
                     if(name_i == name_j){
-                      ROS_ERROR("A recovery behavior with the name %s already exists, this is not allowed. Using the default recovery behaviors instead.", 
+                      ROS_ERROR("A recovery behavior with the name %s already exists, this is not allowed. Using the default recovery behaviors instead.",
                           name_i.c_str());
                       return false;
                     }
@@ -1076,7 +1100,7 @@ namespace move_base {
         }
       }
       else{
-        ROS_ERROR("The recovery behavior specification must be a list, but is of XmlRpcType %d. We'll use the default recovery behaviors instead.", 
+        ROS_ERROR("The recovery behavior specification must be a list, but is of XmlRpcType %d. We'll use the default recovery behaviors instead.",
             behavior_list.getType());
         return false;
       }

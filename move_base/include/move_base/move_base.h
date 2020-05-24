@@ -232,6 +232,11 @@ namespace move_base {
       move_base::MoveBaseConfig default_config_;
       bool setup_, p_freq_change_, c_freq_change_;
       bool new_global_plan_;
+
+      // added for benchmarking
+      ros::WallTime ctrl_timer_start_, ctrl_timer_end_;
+      geometry_msgs::Twist cmd_vel_;
+      std::size_t local_costamp_num_occupied_cells_ = 0;
   };
 };
 #endif
